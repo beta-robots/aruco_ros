@@ -64,7 +64,7 @@ private:
   image_transport::Publisher image_pub;
   image_transport::Publisher debug_pub;
   ros::Publisher pose_pub;
-  ros::Publisher transform_pub; 
+  ros::Publisher transform_pub;
   ros::Publisher position_pub;
   ros::Publisher marker_pub; //rviz visualization marker
   ros::Publisher pixel_pub;
@@ -98,9 +98,9 @@ public:
     else if ( refinementMethod == "HARRIS" )
       mDetector.setCornerRefinementMethod(aruco::MarkerDetector::HARRIS);
     else if ( refinementMethod == "NONE" )
-      mDetector.setCornerRefinementMethod(aruco::MarkerDetector::NONE); 
-    else      
-      mDetector.setCornerRefinementMethod(aruco::MarkerDetector::LINES); 
+      mDetector.setCornerRefinementMethod(aruco::MarkerDetector::NONE);
+    else
+      mDetector.setCornerRefinementMethod(aruco::MarkerDetector::LINES);
 
     //Print parameters of aruco marker detector:
     ROS_INFO_STREAM("Corner refinement method: " << mDetector.getCornerRefinementMethod());
@@ -112,7 +112,7 @@ public:
     mDetector.getMinMaxSize(mins, maxs);
     ROS_INFO_STREAM("Marker size min: " << mins << "  max: " << maxs);
     ROS_INFO_STREAM("Desired speed: " << mDetector.getDesiredSpeed());
-    
+
 
 
     image_sub = it.subscribe("/image", 1, &ArucoSimple::image_callback, this);
@@ -185,6 +185,7 @@ public:
 
   void image_callback(const sensor_msgs::ImageConstPtr& msg)
   {
+     /*
     if ((image_pub.getNumSubscribers() == 0) &&
         (debug_pub.getNumSubscribers() == 0) &&
         (pose_pub.getNumSubscribers() == 0) &&
@@ -196,6 +197,7 @@ public:
       ROS_DEBUG("No subscribers, not looking for aruco markers");
       return;
     }
+    */
 
     static tf::TransformBroadcaster br;
     if(cam_info_received)
@@ -211,73 +213,95 @@ public:
         markers.clear();
         //Ok, let's detect
         mDetector.detect(inImage, markers, camParam, marker_size, false);
-        //for each marker, draw info and its boundaries in the image
+        //for each marker, publish tf always, info and its boundaries in the image
         for(size_t i=0; i<markers.size(); ++i)
         {
           // only publishing the selected marker
           if(markers[i].id == marker_id)
           {
-            tf::Transform transform = aruco_ros::arucoMarker2Tf(markers[i], rotate_marker_axis_);
-            tf::StampedTransform cameraToReference;
-            cameraToReference.setIdentity();
+              tf::Transform transform = aruco_ros::arucoMarker2Tf(markers[i], rotate_marker_axis_);
+              tf::StampedTransform cameraToReference;
+              cameraToReference.setIdentity();
 
-            if ( reference_frame != camera_frame )
+              if ( reference_frame != camera_frame )
+              {
+                getTransform(reference_frame,
+                             camera_frame,
+                             cameraToReference);
+              }
+
+              transform =
+                static_cast<tf::Transform>(cameraToReference)
+                * static_cast<tf::Transform>(rightToLeft)
+                * transform;
+
+              tf::StampedTransform stampedTransform(transform, curr_stamp,
+                                                    reference_frame, marker_frame);
+              br.sendTransform(stampedTransform);
+
+            if( (pose_pub.getNumSubscribers() == 0) )
             {
-              getTransform(reference_frame,
-                           camera_frame,
-                           cameraToReference);
+              geometry_msgs::PoseStamped poseMsg;
+              tf::poseTFToMsg(transform, poseMsg.pose);
+              poseMsg.header.frame_id = reference_frame;
+              poseMsg.header.stamp = curr_stamp;
+              pose_pub.publish(poseMsg);
             }
 
-            transform = 
-              static_cast<tf::Transform>(cameraToReference) 
-              * static_cast<tf::Transform>(rightToLeft) 
-              * transform;
+              if( (transform_pub.getNumSubscribers() == 0) )
+              {
+                geometry_msgs::TransformStamped transformMsg;
+                tf::transformStampedTFToMsg(stampedTransform, transformMsg);
+                transform_pub.publish(transformMsg);
+              }
 
-            tf::StampedTransform stampedTransform(transform, curr_stamp,
-                                                  reference_frame, marker_frame);
-            br.sendTransform(stampedTransform);
-            geometry_msgs::PoseStamped poseMsg;
-            tf::poseTFToMsg(transform, poseMsg.pose);
-            poseMsg.header.frame_id = reference_frame;
-            poseMsg.header.stamp = curr_stamp;
-            pose_pub.publish(poseMsg);
+              if( (position_pub.getNumSubscribers() == 0) )
+              {
+                geometry_msgs::TransformStamped transformMsgPos;
+                tf::transformStampedTFToMsg(stampedTransform, transformMsgPos);
+                geometry_msgs::Vector3Stamped positionMsg;
+                positionMsg.header = transformMsgPos.header;
+                positionMsg.vector = transformMsgPos.transform.translation;
+                position_pub.publish(positionMsg);
+              }
 
-            geometry_msgs::TransformStamped transformMsg;
-            tf::transformStampedTFToMsg(stampedTransform, transformMsg);
-            transform_pub.publish(transformMsg);
+              if( (pixel_pub.getNumSubscribers() == 0) )
+              {
+                geometry_msgs::TransformStamped transformMsgPix;
+                tf::transformStampedTFToMsg(stampedTransform, transformMsgPix);
+                geometry_msgs::PointStamped pixelMsg;
+                pixelMsg.header = transformMsgPix.header;
+                pixelMsg.point.x = markers[i].getCenter().x;
+                pixelMsg.point.y = markers[i].getCenter().y;
+                pixelMsg.point.z = 0;
+                pixel_pub.publish(pixelMsg);
+              }
 
-            geometry_msgs::Vector3Stamped positionMsg;
-            positionMsg.header = transformMsg.header;
-            positionMsg.vector = transformMsg.transform.translation;
-            position_pub.publish(positionMsg);
+              //Publish rviz marker representing the ArUco marker patch
+              if( (marker_pub.getNumSubscribers() == 0) )
+              {
+                geometry_msgs::PoseStamped poseMsg;
+                tf::poseTFToMsg(transform, poseMsg.pose);
+                visualization_msgs::Marker visMarker;
+                visMarker.header = poseMsg.header;
+                visMarker.id = 1;
+                visMarker.type   = visualization_msgs::Marker::CUBE;
+                visMarker.action = visualization_msgs::Marker::ADD;
+                visMarker.pose = poseMsg.pose;
+                visMarker.scale.x = marker_size;
+                visMarker.scale.y = 0.001;
+                visMarker.scale.z = marker_size;
+                visMarker.color.r = 1.0;
+                visMarker.color.g = 0;
+                visMarker.color.b = 0;
+                visMarker.color.a = 1.0;
+                visMarker.lifetime = ros::Duration(3.0);
+                marker_pub.publish(visMarker);
+              }
 
-            geometry_msgs::PointStamped pixelMsg;
-            pixelMsg.header = transformMsg.header;
-            pixelMsg.point.x = markers[i].getCenter().x;
-            pixelMsg.point.y = markers[i].getCenter().y;
-            pixelMsg.point.z = 0;
-            pixel_pub.publish(pixelMsg);
-
-            //Publish rviz marker representing the ArUco marker patch
-            visualization_msgs::Marker visMarker;
-            visMarker.header = transformMsg.header;
-            visMarker.id = 1;
-            visMarker.type   = visualization_msgs::Marker::CUBE;
-            visMarker.action = visualization_msgs::Marker::ADD;
-            visMarker.pose = poseMsg.pose;
-            visMarker.scale.x = marker_size;
-            visMarker.scale.y = 0.001;
-            visMarker.scale.z = marker_size;
-            visMarker.color.r = 1.0;
-            visMarker.color.g = 0;
-            visMarker.color.b = 0;
-            visMarker.color.a = 1.0;
-            visMarker.lifetime = ros::Duration(3.0);
-            marker_pub.publish(visMarker);
-
-          }
-          // but drawing all the detected markers
-          markers[i].draw(inImage,cv::Scalar(0,0,255),2);
+              // but drawing all the detected markers
+              markers[i].draw(inImage,cv::Scalar(0,0,255),2);
+            }
         }
 
         //draw a 3d cube in each marker if there is 3d info
